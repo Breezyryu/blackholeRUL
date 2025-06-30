@@ -1,4 +1,5 @@
 import os
+from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import scipy.integrate as integrate
@@ -81,7 +82,49 @@ def Qodd(file, q_rated):
     Qplot_odd = (Qplot-np.fliplr(Qplot))/2
     Qplot_even = (Qplot+np.fliplr(Qplot))/2
 
-RAIILSET ( "ch09_ SaveData_concatenated_p22_discharge_s3.csv":["../../data/pro d/Dataset Al_ orofile/A1 MP1 4500mAh_T23/". 4500], "ch10_SaveDsta_concatenated_ p22 discharge_ss.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4508mAh_T23/", 4500] A TEST_SET ( "ch19_SaveData concatenated p22 discharce_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/". 4470]. 4470], data [ for kay in list(TRAII_SET. kays()): dqdv, dadv_pos, cyc, Q_empacity " doaV(os.prth.join(TRAI_SET[kay][0], kay), TRAIM_SET[key][1]] "Lodd, ",-- Q_odd(os. path.-]odn(TRAIM_sET[kay][0], kay), TRAIN_SET[kay][1]) data.append([dadv, dedv_pos, a_odd, cyc, "_capacity]) break df-np.asarray(data[0]).T #Create subplot of three plots in same row with shared y-axis fis, ax = plt. subplots(1, 4, sharwy-Truo, tieht_2ayout True) "figsize=(15, 5) ", sharex-True ax[o].scatter(af[:, 0]. af[:, -1], 1) mx[o].sat_rlabe1("dQdv") ax[o].set_ylabal("capacity") wx[1].scattar(af[:, 1], df[:, -1], s-1) ax[1].sat_dabel("dQdV pos") ax[2].scattar(af[:, 2], af[:, -1], s1) ax[2].set_xlebel("Q_od") ax[s].scatter(af[:, 3], df[:, -1], sm1) ax[s].set_xlabel("cycle") plt.suptitle(list(TRAIM_SET.kays())[0].spllt("_", 1)[0]) ", fontsize=12 plt.savefig(dqdv.png")    
+    energy_odd = 3.6 * integrate.trapz(Qplot_odd, x=Vgrid)
+    energy_even = 3.6 * integrate.trapz(Qplot_even, x=Vgrid)
+
+    return energy_odd, energy_even, maxV, maxVpos, Cycle_count, Q_limited_list
+
+if __name__ == "__main__":
+    TRAIN_SET = {
+        "ch09_SaveData_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500], 
+        "ch10_SaveDsta_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500]
+        
+    }
+    TEST_SET = {
+        "ch19_SaveData_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470], 
+        "ch06_SaveData_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470] 
+    }
+
+    data = []
+
+    for key in list(TRAIN_SET.keys()):
+        dqdv, dadv_pos, cyc, Q_capacity = dQdV(os.path.join(TRAIN_SET[key][0], key), TRAIN_SET[key][1])
+        q_odd, _, _, _ = Q_odd(os.path.join(TRAIN_SET[key][0], key), TRAIN_SET[key][1])
+        data.append([dqdv, dadv_pos, q_odd, cyc, Q_capacity])
+
+df = np.asarray(data[0]).T
+#Create subplot of three plots in same row with shared y-axis 
+fig, ax = plt.subplots(1, 4, sharey=True, tight_layout = True) #"figsize=(15, 5) ", sharex-True
+ax[0].scatter(df[0], df[-1], s=1)
+ax[0].set_xlabel("dQdv")
+ax[0].set_ylabel("capacity")
+
+ax[1].scatter(df[1], df[-1], s=1)
+ax[1].set_xlabel("dQdV pos")
+
+ax[2].scatter(df[2], df[-1], s=1)
+ax[2].set_xlabel("Q_odd")
+
+ax[3].scatter(df[3], df[-1], s=1)
+ax[3].set_xlabel("cycle")
+
+plt.suptitle(list(TRAIN_SET.keys())[0].split("_", 1)[0], fontsize=12)
+plt.savefig("dqdv.png")
+
+plt.show()
 
 
 
