@@ -16,17 +16,18 @@ def dQdV(file, q_rate):
     maxVpos = np.array([])
 
     for name, group in d1.groupby('Cycle_Number'):
-        Vd = group.voltage_V.values # + d1.Current.values 0.065/1000 
-        Id = -group. Current_mA.values
+        Vd = group.Voltage_V.values # + d1.Current.values 0.065/1000 
+        Id = -group.Current_mA.values
         time = group.Time_s.values
         time = time - time[0]
         Qd = 1 - (integrate.cumulative_trapezoid(Id, x=time, initial=0)/(3600*q_rate))
         if np.size(Vd) > 0:
             Q = np.flip(np.interp(Vgrid, np.flip(Vd), np.flip(Qd)))
-            Opdf = np.append(Opdf, Q)
-            Q_limited_list = np.append(Q_limited_list, Opdf[-1] - Q[0])
-            maxV = np.append(maxV, np.max(Vd))
-            maxVpos = np.append(maxVpos, np.argmax(Vd))
+            Qpdf = np.append(Qpdf, Q)
+            Q_limited_list = np.append(Q_limited_list, Qpdf[-1] - Q[0])
+            maxV = np.append(maxV, np.max(dQdV))
+														idx = np.argmin(np.abs(dQdV - np.max(dQdV))
+            maxVpos = np.append(maxVpos, Vgrid[idx])
 
             cycle_number = int(name)
             Cycle_count = np.append(Cycle_count, cycle_number)
@@ -44,8 +45,8 @@ def dQdV(file, q_rate):
     return maxV, maxVpos, Cycle_count, Q_limited_list
 
 #energy odd 
-def Qodd(file, q_rated):
-    d1 = pd.read_csv(file)[["Cycle_Number", "Voltage_V", "Current _mA", "Time_s", "Capacity_mAh"]]
+def Q_odd(file, q_rated):
+    d1 = pd.read_csv(file)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
 
     Vgrid = np.arange(3.2, 4.2, 0.01)
     Qgrid = np.arange(0, 1, 0.01)
@@ -82,10 +83,10 @@ def Qodd(file, q_rated):
     Qplot_odd = (Qplot-np.fliplr(Qplot))/2
     Qplot_even = (Qplot+np.fliplr(Qplot))/2
 
-    energy_odd = 3.6 * integrate.trapezoid(Qplot_odd, x=Vgrid)
+    energy_odd = 3.6 * integrate.trapezoid(np.abs(Qplot_odd), x=Vgrid)
     energy_even = 3.6 * integrate.trapezoid(Qplot_even, x=Vgrid)
 
-    return energy_odd, energy_even, maxV, maxVpos, Cycle_count, Q_limited_list
+    return energy_odd, maxVpos, Cycle_count, Q_limited_list
 
 #dataset = TRAIN_SET
 def getGC(dataset, dataset_probe):
@@ -101,19 +102,19 @@ def getGC(dataset, dataset_probe):
         q_rated = dataset[key][1]
         file_running = os.path.join(dataset[key][0], key)
         # get the running cycle
-        ds_running = pd.read_csv(file_running)[["Cycle_Number", "Voltage_V", "Current _mA", "Time_s", "Capacity_mAh"]]
-        for name, group in ds_running.groupby("Cycle_Number"):
+        ds_running = pd.read_csv(file_running)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
+        for name, group in ds_running.groupby('Cycle_Number'):
             cycle_count_running = np.append(cycle_count_running, int(name))
             # prob cycle
             ds = pd.read_csv(file)[["Cycle_number", "Voltage_V", "Current _mA", "Time_s", "Capacity_mAh"]]
             
             for name, group in ds.groupby("Cycle_Number"):
-                voltoge_list = np.append(voltoge_list, group.Voltage_V.values[0])
+                voltage_list = np.append(voltoge_list, group.Voltage_V.values[0])
                 cycle_count = np.append(cycle_count, int(name))
                 capacity_list = np.append(capacity_list, group.Capacity_mAh.values[-1]/q_rated)
             
     # filter capacity, cycle
-    filter_idx_list = np.where(voltoge_list > 4.48715)
+    filter_idx_list = np.where(voltage_list > 4.48715)
     capacity_list = capacity_list[filter_idx_list]
     cycle_count = cycle_count[filter_idx_list]
     plt.scatter(cycle_count[2:], capacity_list[2:])
@@ -133,28 +134,28 @@ def getGC(dataset, dataset_probe):
 # probe capacity
 def getProbeCap(file, q_rated, file_running):
     # get the running cycle
-    ds_running = pd.read_csv(file_running)[["Cycle_Number", "Voltage_V", "Current _mA", "Time_s", "Capacity_mAh"]]
+    ds_running = pd.read_csv(file_running)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
     cycle_count_running = np.array([])
 
     for name, group in ds_running.groupby('Cycle_Number'):
         cycle_count_running = np.append(cycle_count_running, int(name))
 
     # prob cycle
-    ds = pd.read_csv(file)[["Cycle_Number", "Voltage_v", "Current_mA", "Time_s", "Capacity_mAh"]]
+    ds = pd.read_csv(file)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
 
     capacity_list = np.array([])
     cycle_count = np.array([])
     voltage_list = np.array([])
 
     for name, group in ds.groupby('Cycle_Number'):
-        voltage_list = np. append(voltage_list, group.Voltage_V.values[0])
+        voltage_list = np.append(voltage_list, group.Voltage_V.values[0])
         cycle_count = np.append(cycle_count, int(name))
         capacity_list = np.append(capacity_list, group.Capacity_mAh.values[-1])
    
     percentile_80 = np.percentile(voltage_list, 80)
     percentile_50 = np.percentile(voltage_list, 50)
-    print(percentile_50)
     print(percentile_80)
+    print(percentile_50)
 
     # filter capacity, cycle
     filter_idx_list = np.where(voltage_list > 4.48715)
@@ -186,7 +187,7 @@ def getProbeGCcap(file, q_rated, coeef, file_running):
     mod_cap_list = np.array([])
     for name, group in ds_running.groupby('Cycle_Number'):
         cycle_count_running = np.append(cycle_count_running, int(name))
-        mod_cap_list = np.append(mod_cap_list, int(name) * coeef[0] * coeef[1])
+        mod_cap_list = np.append(mod_cap_list, int(name) * coeef[0] + coeef[1])
     print("getProbeGCcap", mod_cap_list.shape)
     return cycle_count_running, mod_cap_list
     
@@ -194,7 +195,7 @@ def getProbeGCcap(file, q_rated, coeef, file_running):
 if __name__ == "__main__":
     TRAIN_SET = {
         "ch09_SaveData_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500],
-      "ch10_SaveDsta_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500]
+      "ch10_SaveData_concatenated_p22_discharge_s3.csv":["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500]
     }
 
     TEST_SET = {
@@ -205,27 +206,27 @@ if __name__ == "__main__":
     data = []
 
     for key in list(TRAIN_SET.keys()):
-        dqdv, dadv_pos, cyc, q_capacity = dQdV(os.path.join(TRAIN_SET[key][0], key), TRAIN_SET[key][1])
+        dqdv, dqdv_pos, cyc, q_capacity = dQdV(os.path.join(TRAIN_SET[key][0], key), TRAIN_SET[key][1])
         q_odd, _, _, _ = Q_odd(os.path.join(TRAIN_SET[key][0], key), TRAIN_SET[key][1])
-        data.append([dqdv, dadv_pos, q_odd, cyc, q_capacity])
+        data.append([dqdv, dqdv_pos, q_odd, cyc, q_capacity])
 
     df = np.asarray(data[0]).T
     #Create subplot of three plots in same row with shared y-axis 
     fig, ax = plt.subplots(1, 4, sharey=True, tight_layout = True) #"figsize=(15, 5) ", sharex-True
-    ax[0].scatter(df[0], df[-1], s=1)
-    ax[0].set_xlabel("dQdv")
+    ax[0].scatter(df[:,0], df[:,-1], s=1)
+    ax[0].set_xlabel("dQdV")
     ax[0].set_ylabel("capacity")
 
-    ax[1].scatter(df[1], df[-1], s=1)
+    ax[1].scatter(df[:,1], df[:,-1], s=1)
     ax[1].set_xlabel("dQdV pos")
 
-    ax[2].scatter(df[2], df[-1], s=1)
+    ax[2].scatter(df[:,2], df[:,-1], s=1)
     ax[2].set_xlabel("Q_odd")
 
-    ax[3].scatter(df[3], df[-1], s=1)
+    ax[3].scatter(df[:,3], df[:,-1], s=1)
     ax[3].set_xlabel("cycle")
 
-    plt.suptitle(list(TRAIN_SET.keys())[0].split("_", 1)[0], fontsize=12)
+    plt.suptitle(list(TRAIN_SET.keys())[0].split("_", 1)[0]) #, fontsize=12)
     plt.savefig("dqdv.png")
 
     plt.show()
