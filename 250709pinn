@@ -1,0 +1,675 @@
+import os
+import random
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm, trange
+
+# -- 사용자 정의 모듈 경로 추가
+sys.path.append("../../feature")
+from feature_dqdv import dQdV, getoc, setProbeGCcap, Q_odd
+
+# -- 디바이스 설정
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
+#cell2
+
+# Matplotlib 전역 스타일 설정
+plt.rcParams['figure.figsize'] = [6.4, 4.8]
+#plt.rcParams['font.size'] = 22
+plt.rcParams.update({'font.size' = 22})
+plt.rcParams['axes.linewidth'] = 4  # 축 선 두께
+plt.rcParams['lines.linewidth'] = 4 # 그래프 선 두께
+
+# X축 틱(tick) 설정
+plt.rcParams['xtick.direction'] = 'in'
+plt.rcParams['xtick.major.size'] = 7
+plt.rcParams['xtick.major.width'] = 2
+
+# Y축 틱(tick) 설정
+plt.rcParams['ytick.direction'] = 'in'
+plt.rcParams['ytick.major.size'] = 7
+plt.rcParams['ytick.major.width'] = 2
+plt.rcParams['ytick.minor.size'] = 5
+plt.rcParams['ytick.minor.width'] = 1
+
+# 현재 figure의 축 범위 설정 (전역 설정이 아님)
+# plt.xlim([-100, 2100])
+# plt.ylim(-0.02, 1.1)
+
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import numpy as np
+import torch
+import random
+
+def MAPE(y_true, y_pred):
+    """
+    Mean Absolute Percentage Error (NumPy 버전)
+    - y_true가 0일 경우 ZeroDivisionError 발생 가능
+    """
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    # 0으로 나누는 것을 방지하기 위해 작은 값(epsilon)을 더해줍니다.
+    epsilon = 1e-8
+    return np.mean(np.abs((y_true - y_pred) / (y_true + epsilon))) * 100
+
+def mape_loss(preds, target):
+    """
+    MAPE Loss (PyTorch 버전)
+    - 모델 학습을 위한 손실 함수로 사용
+    """
+    epsilon = 1e-8
+    return torch.mean(torch.abs((preds - target) / (target + epsilon))) * 100
+
+def RMSPE(y_true, y_pred):
+    """
+    Root Mean Square Percentage Error (NumPy 버전)
+    """
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    # 0으로 나누는 것을 방지하기 위해 작은 값(epsilon)을 더해줍니다.
+    epsilon = 1e-8
+    percentage_errors = (y_true - y_pred) / (y_true + epsilon)
+    squared_percentage_errors = np.square(percentage_errors)
+    mean_squared_percentage_error = np.mean(squared_percentage_errors)
+    rmspe_value = np.sqrt(mean_squared_percentage_error) * 100
+    return rmspe_value
+
+def set_seed(seed=42):
+    """
+    실험 재현성을 위한 시드 고정 함수
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    # Multi-GPU 환경을 위한 추가 설정
+    torch.cuda.manual_seed_all(seed) 
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+# 시드 고정
+set_seed(42)
+
+# 데이터셋 정의
+# 형식: { "파일명": ["데이터 경로", 용량(mAh)] }
+
+# 훈련 데이터셋
+TRAIN_SET = {
+    "ch09_SaveData_concatenated_p22_discharge_s3.csv": ["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500],
+    "ch10_SaveData_concatenated_p22_discharge_s3.csv": ["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500]
+}
+
+# 테스트 데이터셋
+TEST_SET = {
+    "ch19_SaveData_concatenated_p22_discharge_s3.csv": ["../../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470],
+    "ch06_SaveData_concatenated_p22_discharge_s3.csv": ["../../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470]
+}
+
+# 훈련 프로브(Probe) 데이터셋
+TRAIN_PROBE_SET = {
+    "ch09_SaveData_concatenated_p22_discharge_s1.csv": ["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500],
+    "ch10_SaveData_concatenated_p22_discharge_s1.csv": ["../../data/processed/Dataset_A1_profile/A1_MP1_4500mAh_T23/", 4500]
+}
+
+# 테스트 프로브(Probe) 데이터셋
+TEST_PROBE_SET = {
+    "ch19_SaveData_concatenated_p22_discharge_s1.csv": ["../../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470],
+    "ch06_SaveData_concatenated_p22_discharge_s1.csv": ["../../../data/processed/Dataset_A1_profile/A1_MP2_4470mAh_T23/", 4470]
+}
+
+# # 아래 `getGC` 함수는 사용자가 별도로 정의해야 합니다.
+# getGC(TRAIN_SET, TRAIN_PROBE_SET)
+
+# # Matplotlib을 사용하여 그림 저장
+# plt.savefig("GC.png")
+
+def interp_probe(file, file_running, q_rated=None):
+    """
+    'running' 데이터의 사이클을 기준으로 'probe' 데이터의 용량(q)을 보간하고,
+    실제 probe 데이터와 보간된 데이터를 함께 시각화하는 함수.
+
+    Args:
+        file (str): 프로브(probe) 데이터 파일 경로.
+        file_running (str): 연속 가동(running) 데이터 파일 경로.
+        q_rated (float, optional): 정격 용량. 현재 코드에서는 사용되지 않음.
+    """
+    # 1. 'Running' 데이터 로드 및 사이클 추출
+    running_df = pd.read_csv(file_running)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
+    running_cyc = np.array([]])
+    for name, group in running_df.groupby('Cycle_Number'):
+        running_cyc = np.append(running_cyc, int(name))
+
+    # 2. 'Probe' 데이터 로드 및 사이클, 전압, 용량 추출
+    probe_df = pd.read_csv(file)[["Cycle_Number", "Voltage_V", "Current_mA", "Time_s", "Capacity_mAh"]]
+
+    probe_q = np.array([])
+    probe_cyc = np.array([])
+    probe_v = np.array([])
+    
+    for name, group in probe_df.groupby("Cycle_Number"):
+        probe_v = np.append(probe_v, group.Voltage_V.values[0])
+        probe_cyc = np.append(int(name))
+        probe_q = np.append(probe_q, group.Capacity_Ah.values[-1])
+    
+    # 3. 특정 전압(4.48715V) 이상인 데이터만 필터링
+    filter_idx = np.where(probe_v > 4.48715)
+    probe_q = probe_q[filter_idx]
+    probe_cyc = probe_cyc[filter_idx]
+    
+    # 4. 'Running' 데이터의 사이클 범위를 'Probe' 데이터에 맞춰 조정
+    # 'probe' 마지막 사이클과 가장 가까운 'running' 사이클을 찾음
+    
+    probe_last_cyc_idx = np.argmin(np.abs(running_cyc  - probe_cyc[-1]))
+    
+    # 'probe' 데이터 범위 밖의 'running' 사이클은 제거 (외삽 방지)
+    running_cyc = running_cyc[:probe_last_cyc_idx]
+
+    # 5. 'Running' 사이클에 맞춰 'Probe' 용량 보간
+    
+    probe_q_interp = np.interp(running_cyc, probe_cyc, probe_q)
+
+    # 6. 결과 시각화
+    cell_name = Path(file).name.split("_", 1)[0]
+    
+    plt.figure() # 새로운 그림(figure) 생성
+    plt.xlim(-50, 2000)
+    plt.scatter(probe_cyc, probe_q, s=10, label = cell_name + "true")
+    plt.scatter(running_cyc, probe_q_interp, s=1, label = cell_name + "interp")
+    plt.legend(loc = 'upper right', bbox_to_anchor=(1.65, 1.0))
+    plt.xlabel("Cycle")
+    plt.ylabel("probe_Q")
+
+    return running_cyc, probe_q_interp
+    
+key = list(TRAIN_SET.keys())[0]
+key_p = list(TRAIN_PROBE_SEY.keys())[0]
+running_file = os.path.join(TRAIN_SET[key][0], key)
+probe_file = os.path.join(TRAIN_PROBE_SET[key][0], key_p)
+interp_probe(probe_file, TRAIN_SET[key][1], running_file)
+
+# GC(Gain/Correction) 값으로 추정되는 딕셔너리
+GC = {
+    "ch09_SaveData_concatenated_p22_discharge_s1.csv": [-3.60687931e-05, 1.03256166e+00],
+    "ch10_SaveData_concatenated_p22_discharge_s1.csv": [-3.60687931e-05, 1.03256166e+00],
+    "ch19_SaveData_concatenated_p22_discharge_s1.csv": [-3.38746281e-05, 1.03206004e+00],
+    "ch06_SaveData_concatenated_p22_discharge_s1.csv": [-3.38746281e-05, 1.03206004e+00]
+}
+
+# 하이퍼파라미터 및 상수 설정
+
+WINDOW_SIZE = 200
+CYCLE_NORMALIZE = 1000
+PROBE_Q_NORMALIZE = 4625
+
+def get_data(dataset_running, dataset_probe):
+    """
+    데이터셋을 순회하며 dQ/dV 특징과 프로브 용량 데이터를 추출하고,
+    슬라이딩 윈도우 방식으로 모델 학습용 데이터를 생성하는 함수.
+    """
+    # 최종 결과를 파일별로 모으는 마스터 리스트
+    x_list, x_M_list, x_HI_list, y_list = [], [], [], []
+    
+    # 원본 데이터를 저장할 리스트 (디버깅 또는 추가 분석용)
+    raw_probe_cyc_list, raw_probe_q_list, q_running_list = [], [], []
+
+    # 두 데이터셋의 파일 목록을 순회
+    for key, key_p in zip(list(dataset_running.keys()), list(dataset_probe.keys())):
+        print(f"Processing file: {key}")
+        
+        # 1. Running 데이터로부터 dQ/dV 특징 추출
+        running_file_path = os.path.join(dataset_running[key][0], key)
+        dQdV_max, dQdV_max_pos, _, Q_limited_list = dQdV(
+            running_file_path, dataset_running[key][1]
+        )
+        dQdV_max_and_pos = np.concatenate(
+            (np.expand_dims(dQdV_max, axis=-1), np.expand_dims(dQdV_max_pos, axis=-1)),
+            axis=-1
+        )
+
+        # 2. Probe 데이터로부터 보간된 용량(q) 값 추출
+        probe_file_path = os.path.join(dataset_probe[key_p][0], key_p)
+        probe_cyc, probe_q = interp_probe(
+            probe_file_path, dataset_probe[key_p][1], running_file_path
+        )
+
+        # 3. 원본 데이터 및 디버깅 정보 저장
+        raw_probe_cyc_list.append(probe_cyc)
+        raw_probe_q_list.append(probe_q)
+        q_running_list.append(Q_limited_list)
+        print(f"  - Length of probe_cyc: {len(probe_cyc)}, Length of probe_q: {len(probe_q)}")
+
+        # 4. 레이블(용량) 스케일링
+        probe_q /= PROBE_Q_NORMALIZE
+        # delta
+        probe_q = probe_q - probe_q[0] # (필요시 사용)
+
+        # 5. 슬라이딩 윈도우 생성
+        # 한 파일에서 생성될 윈도우들을 담을 임시 리스트
+        x, y, x_HI, x_M = [], [], [], []
+        
+        for i in range(len(probe_q) - WINDOW_SIZE + 1):
+            # 윈도우에 해당하는 데이터 추출
+            Cycle_array = np.linspace(i-1, i+WINDOW_SIZE, WINDOW_SIZE)
+            Mode = np.where(Cycle_array < 298, 1, np.where(Cycle_array < 595, 0.82, np.where(Cycle_array < 892, 0.64, 0.1)))
+
+            x_HI.append(np.array(dQdV_max_and_pos[:200]))
+            x_M.append(Mode)
+            x.append(Cycle_array/CYCLE_NORMALIZE)
+            y.append(probe_q[i : i + WINDOW_SIZE])
+
+        x = np.array(x).reshape(-1, WINDOW_SIZE, 1)
+        x_M = np.array(x_M).reshape(-1, WINDOW_SIZE, 1)
+        x_HI = np.array(x_HI).reshape(-1, WINDOW_SIZE, 2)
+        y = np.array(y)
+        
+        x_list.append(x)
+        x_HI_list.append(x_HI)
+        x_M_list.append(x_M)
+        y_list.append(y)
+    
+    return x_list, x_HI_list, x_M_list, y_list, raw_probe_cyc_list, raw_probe_q_list, q_running_list
+    
+
+def get_test_data(dataset_running, dataset_probe):
+    """
+    데이터셋을 순회하며 dQ/dV 특징과 프로브 용량 데이터를 추출하고,
+    슬라이딩 윈도우 방식으로 모델 학습용 데이터를 생성하는 함수.
+    """
+    # 최종 결과를 파일별로 모으는 마스터 리스트
+    x_list, x_M_list, x_HI_list, y_list = [], [], [], []
+    
+    # 원본 데이터를 저장할 리스트 (디버깅 또는 추가 분석용)
+    raw_probe_cyc_list, raw_probe_q_list, q_running_list = [], [], []
+
+    # 두 데이터셋의 파일 목록을 순회
+    for key, key_p in zip(list(dataset_running.keys()), list(dataset_probe.keys())):
+        print(f"Processing file: {key}")
+        
+        # 1. Running 데이터로부터 dQ/dV 특징 추출
+        running_file_path = os.path.join(dataset_running[key][0], key)
+        dQdV_max, dQdV_max_pos, _, Q_limited_list = dQdV(
+            running_file_path, dataset_running[key][1]
+        )
+        dQdV_max_and_pos = np.concatenate(
+            (np.expand_dims(dQdV_max, axis=-1), np.expand_dims(dQdV_max_pos, axis=-1)),
+            axis=-1
+        )
+
+        # 2. Probe 데이터로부터 보간된 용량(q) 값 추출
+        probe_file_path = os.path.join(dataset_probe[key_p][0], key_p)
+        probe_cyc, probe_q = interp_probe(
+            probe_file_path, dataset_probe[key_p][1], running_file_path
+        )
+
+        # 3. 원본 데이터 및 디버깅 정보 저장
+        raw_probe_cyc_list.append(probe_cyc)
+        raw_probe_q_list.append(probe_q)
+        q_running_list.append(Q_limited_list)
+        print(f"  - Length of probe_cyc: {len(probe_cyc)}, Length of probe_q: {len(probe_q)}")
+
+        # 4. 레이블(용량) 스케일링
+        probe_q /= PROBE_Q_NORMALIZE
+        # delta
+        probe_q = probe_q - probe_q[0] # (필요시 사용)
+
+        # 5. 슬라이딩 윈도우 생성
+        # 한 파일에서 생성될 윈도우들을 담을 임시 리스트
+        x, y, x_HI, x_M = [], [], [], []
+        
+        for i in range(2000 - WINDOW_SIZE + 1):
+            # 윈도우에 해당하는 데이터 추출
+            Cycle_array = np.linspace(i-1, i+WINDOW_SIZE, WINDOW_SIZE)
+            Mode = np.where(Cycle_array < 298, 1, np.where(Cycle_array < 595, 0.82, np.where(Cycle_array < 892, 0.64, 0.1)))
+
+            x_HI.append(np.array(dQdV_max_and_pos[:200]))
+            x_M.append(Mode)
+            x.append(Cycle_array/CYCLE_NORMALIZE)
+            if i + WINDOW_SIZE < len(probe_q):
+                y.append(probe_q[i : i + WINDOW_SIZE])
+
+        x = np.array(x).reshape(-1, WINDOW_SIZE, 1)
+        x_M = np.array(x_M).reshape(-1, WINDOW_SIZE, 1)
+        x_HI = np.array(x_HI).reshape(-1, WINDOW_SIZE, 2)
+        y = np.array(y)
+        
+        x_list.append(x)
+        x_HI_list.append(x_HI)
+        x_M_list.append(x_M)
+        y_list.append(y)
+    
+    return x_list, x_HI_list, x_M_list, y_list, raw_probe_cyc_list, raw_probe_q_list, q_running_list
+
+
+x_list, x_HI_list, x_M_list, y_list, raw_probe_cyc_list, raw_probe_q_list, _ = get_data(TRAIN_SET, TRAIN_PROBE_SET)
+
+plt.suptitle("True and interpolated Q")
+plt.savefig("train_interp.png", bbox_inches = 'tight')
+
+print(len(y_list[0]), len(y_list[1]))
+
+train_x = np.concatenate((x_list[0], x_list[1]))
+print("train_x.shape", train_x. shape)
+
+train_x_M= np.concatenate((x_M_list[0], x_M_list[1]))
+
+train_x_HI = np.concatenate((x_HI_list[0], X_HI_list[1]))
+
+train_y = np.concatenate((y_list[0], y_list[1]))
+
+train_x_tensor = torch.tensor(train_x, dtype=torch.float32).to(DEVICE)
+train_x_M_tensor = torch.tensor(train_x_M, dtype=torch.float32).to(DEVICE)
+train_x_HI_tensor = torch.tensor(train_x_HI, dtype=torch.float32).to(DEVICE)
+train_y_tensor = torch.tensor(train_y, dtype=torch.float32).to(DEVICE)
+train_x_tensor.shape, train_x_M_tensor.shape, train_x_HI_tensor.shape, train_y_tensor.shape
+
+
+class MyDataset (Dataset):
+    def _init_(self, X1,X2,X3.y):
+        self.X1= X1
+        self.X2 = X2
+        self.x3 = X3
+        self.y = y
+        
+    def __len__(self):
+        return len(self.X1)
+        
+    def __getitem__(self, idx):
+        return self.X1[idx],self.X2[idx],self.X3[idx],self.y[idx]
+        
+dataset = MyDataset(torch.tensor(train_x, dtype=torch.float32), torch.tensor(train_x_M, dtype=torch.float32), torch.tensor(train_x_HI, dtype=torch.float32), torch.tensor(train_y, dtype=torch.float32))
+
+data_loader = Dataloader(dataset, batch_size= 300, shuffle = True)
+
+
+class LSTM_model(nn.Module):
+    def _init__(self, input_size, hidden_size):
+        super().__init__()
+        self.input _size = input_size
+        self.hidden_size = hidden_size
+        
+        self.lstm = nn.LSTM(self.input_size, self.hidden_size, num_ layers=1,batch_first = True)
+        self.fc = nn.Linear(self.hidden_size, 1)
+        
+    def forward(self, x, M, HI):
+        x = torch.cat([x, M, HI],dim=2)
+        x = self.lstm(x)[0]
+        x = self.fc(x)
+        x =  x.squceze(2)
+        return x
+
+
+
+torch.manual_seed(11)
+model LSTM_model(4, 600).to(DEVICE)
+optimizer = torch.optim.Adam(model.parameters())
+loss_fn_train = torch.nn.MSELoss()
+
+loss_best = 100
+num,_epochs = 1500
+
+epoch_pbar = trange(num_epochs, desc ="Epochs", ncols=150)
+
+for epoch in epoch_pbar:
+    train_loss = 0
+    for batch_x1, batch_x2,batch_x3,batch_y in data_loader:
+        model.train()
+        batch_x1 = batch_x1.to(DEVICE)
+        batch_x2 = batch_x2.to(DEVICE)
+        batch_x3 = batch_x3.to(DEVICE)
+        batch_y = batch_y.to(DEVICE)
+        SOH_pred = model(batch_x1, batch_x2, batch_x3)
+        loss = torch.sqrt(loss_fn_train(SOH_pred, batch_y))
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss
+    train_loss = float(train_loss/len(deta_loader))
+    epoch_pbar.set_postfix({'data_loss': float(train_loss), 'best_loss' loss_best})
+    if train_loss < loss_best:
+        loss_best = train_loss
+        torch.save(model.state_dict(), 'saved_weight/SOH_prediction_mode_feature')
+        
+model_new = LSTM_model(4, 600).to(DEVICE)
+model_new.load_state_dict(torch.load('saved_weight/SOH_prediction_mode_feature'))
+model_new.eval()
+
+probe_q_pred_list = []
+
+for cell_data in zip(x_list, x_M_list, x_HI_list):
+    train_x_tensor = torch.tensor(cell_data[0], dtype=torch.float32).to(DEVICE)
+    train_x_M_tensor = torch.tensor(cell_data[1], dtype=torch.float32).to(DEVICE)
+    train_x_HI_tensor = torch.tensor(cell_data[2], dtype=torch.float32).to(DEVICE)
+    
+    print(train_x_tensor.shape, train_x_M_tensor.shape, train_x_HI_tensor.shape)
+    
+    SOH_test_pred = model_new(train_x_tensor, train_x_M_tensor, train_x_HI_tensor).cpu().detach().numpy()
+    
+    max_length = len(train_x_tensor)+199
+    total = []
+    for i in range(len(SOH_test_pred)):
+        temporal = np.zeros(max_length)
+        temporal[i:i+200] = SOH_test_pred[i]
+        total.append(temporal)
+    
+    total= np.array(total)
+    
+    mean_array = []
+    
+    for k in range(total.shape[1]):
+        non_zeros = total[:,k][total[:, k] != 0.]
+        mean_array.append(np.mean(non_zeros))
+        
+    probe_q_pred_list.append(mean_array)
+    
+
+
+cyc_all = np.append(raw_probe_cyc_list[0], raw_probe_cyc_list[1])
+probe_q_true = np-append(raw_probe_q_list[0], raw_probe_q_list[1])
+probe_q_pred = np.append(probe_q_pred_list[0], probe_q_pred_list[1])
+
+plt.xlim(-50, 2000)
+plt.ylim(0.90, 1.01)
+plt.grid(True, which='both', linestyle='--', Linewidth=0.5) # Customize grid properties
+
+probe_q_true_train_scaled = probe_q_true
+probe_q_pred_train_scaled = probe_q_pred + probe_q_true[0]
+
+plt.scatter(cyc_all, probe_q_true_train_scaled, label="probe_q", s=1)
+plt.scatter(cyc_all, probe_q_pred_train_scaled, label="Q_running", s=1)
+
+plt.xlabel("Cycle")
+plt.ylabel("probe _Q")
+#plt.legend()
+plt.legend(['true','pred'], loc='upper right', markerscale=10, bbox_to_anchor=(1.45, 1.0))
+#plt.ylim(0.7, 0.85)
+plt.suptitle("Training" +" (true vs prediction)")
+
+# calculate MAE
+mae = round(np.mean(np.abs(probe_q_true_train_scaled - probe_q_pred_train_scaled)), 3)
+plt.text(0, 0.93, "MAE: " + str(mae))
+plt. savefig("train_dQdv.png", bbox_inches='tight')
+
+cyc_all_train = np.append(raw_probe_cyc_list[0], raw_probe_cyc_list[1])
+probe_q_pred_train = np.append(probe_q_pred_list[0], probe_q_pred_list[1])
+
+probe_q_pred_train = probe_q_pred_train + probe_q_true[0]
+print(probe_q_pred_train[:10])
+# finetuning
+batter_num = 1
+model_new = LSTM_model(4, 600).to(DEVICE)
+model_new.load_state_dict(torch.load('saved_weight/SOH_prediction_mode_feature'))
+## skip below line if FINETUNING
+#model_new.eval()
+
+# 원하는 layer freeze
+for name, param in model_new.named_parameters():
+    if (name == 'fc.weight') I (name == 'fc.bias'):
+        param.requires_grad= True
+    else:
+        param.requires_gred = False
+
+x_lIst_t, X_HI_list_t, x_M_list_t, y_list_t, raw_probe_cyc_list_t, raw probe_q_list_t, q_running_list = get_test_deta(TEST_SET, TEST_PROBE_SET)
+Q_limited_list =  q_running_list[0]
+Q_limited_list = [x * 4700 / PROBE_Q_NORMALIZE for x in Q_limlted_list]
+
+print(x_list_t[batter_num].shape)
+print(len(x_list_t[0]))
+print(len(x_HI_list_t[0]))
+print(len(x_M_list_t[0]))
+print(len(y_list_t[o]))
+
+test_x_tensor = torch.tensor(x_list_t[batter_num], dtype=torch.float32).to(DEVICE)
+test_x_M_tensor = torch.tensor(x_M_list_t[batter_num], dtype = torch.float32).to(DEVICE) test_x_HI_tensor = torch.tensor(x_HI_list_t[batter_num], dtype = torch.float32).to(DEVICE)
+test_y_tensor = torch.tensor(y_list_t[batter_num], dtype=torch.float32).to(DEVICE)
+
+#Fine tuning
+
+fine_length = 1
+fine_dataset = MyDataset(test_x_tensor[:fine_length], test_x_M_tensor[:fine_length],test_x_HI_tensor[:fine_length],test_y_tensor[:fine_length])
+fine_data_loader =  DataLoader(fine_detaset)
+
+optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model_new.paremeters(), lr = 0.0001)
+loss_fn_train = torch.nn.MSELoss()
+
+fine_epoch = 100
+
+epoch_pbar_fine = trange(fine_epoch, desc="Epochs", ncols=100)
+
+for epoch in epoch_ pbar_fine:
+    train_loss = 0
+    for batch_x1, batch_x2, batch_x3, batch_y in flne_data_loader:
+        model_new.train()
+        batch_x1 = batch_x1.to(DEVICE)
+        batch_x2 = batch_x2.to(DEVICE)
+        batch_x3 = batch_x3.to(DEVICE)
+        batch_y = batch_y.to(DEVICE)
+        SOH_pred = model_new(batch_x1, batch_x2, batch_x3)
+        
+        loss = torch.sqrt(1oss_fn_train(SOH_pred, batch_y))
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss.item()
+    train_loss = train_loss/len(fine_data_loader)
+    epoch_pbar_fine.set_postfix({'Loss' : float(train_loss)})
+
+model_new.eval()
+
+SOH_test_pred = model_new(test_x_tensor[:len(y_list_t[0])], test_x_M_tensor[:len(y_list_t[0])],test_x_HI_tensor[:len(y_list_t[0])]).cpu().detach().numpy()
+
+max_length = len(y list_t[0])+199
+total = []
+
+for i in range(len(SOH_test_pred)):
+    temporal = np.zeros(max_length)
+    temporal[i:i+200] = SOH_test_pred[i]
+    totael.append(temporal)
+
+total = np.array(total)
+mean_array = []
+
+for k in range(total.shape[1]):
+    non_zeros = total[:,k][total[:, k] != 0.]
+    mean_array.append(np.mean(non_zeros))
+    
+probe_q_pred_list_t = []
+for cell_data in zip(x_list_t, x_M_list_t, x_HI_list_t):
+    x_tensor = torch.tensor(cell_data[0], dtype=torch.float32).to(DEVICE)
+    x_M_tensor = torch.tensor(cell_data[1], dtype=torch.float32).to(DEVICE)
+    x_HI_tensor = torch.tensor(cell_data[2], dtype=torch.float32).to(DEVICE)
+    
+    print(x_tensor.shape, x_M_tensor.shape, x_HI_tensor.shape)
+    
+    Q_pred = model_new(x_tensor, x_M_tensor, x_HI_tensor).cpu().detach(),numpy()
+    max_length = len(x_tensor)+199
+    total = []
+    
+    for i in range(len(Q_pred)):
+        temporal = np.zeros(max_length)
+        temporal[i:i+200] = Q_pred[i]
+        total.append(temporal)
+        
+total = np.array(total)
+
+mean_array = []
+
+    for k in range(total.shape[1]):
+        non_zeros = total[:,k][total[:, k] I= 0.]
+        mean_array.append(np.mean(non_zeros))
+
+    probe-_g_pred_list_t.append(mean_array)
+
+key = list(TEST_SET.keys())[batter_num]
+cell_name = key.split("_", 1)[0]
+cyc_all = raw_probe_cyc_list_t[batter _num]
+probe_q_true = raw_probe_q_list_t[batter _num]
+probe_q_pred = probe_q_pred_list_t[batter_num]
+plt.plot((probe_q_pred + probe_q_true[0]))    
+
+cyc_explt = []
+for i in range(0, len(probe_q_pred_list_t[batter_num]), 1):
+    cyc_explt.append(i)
+    
+cyc_explt = np.array(cyc_explt)
+print(len(cyc_explt))
+
+key = list(TEST SET.keys())[batter_num]
+cell_name = key.split("_", 1)[0]
+
+cyc_all = raw_probe_cyc_list_t[batter_num]
+probe_q_true = raw_probe_q_list_t[batter_num]
+probe_q_pred = probe_q_pred_list_t[batter_num]
+
+plt.xlim(-50, 2200)
+plt.ylim(0.75, 1.01)
+
+true_q_scaled = probe_q_true
+pred_explt = probe_q_pred + probe_q_true[0]
+
+idx_200 = np.argmin(np.abs(cyc_all - 200))
+
+plt.scatter(cyc_all, true_q_scaled, label = "probe_q", s=1)
+plt.scatter(cyc_explt[idx_200:], pred_explt[idx_200:], label="Q_running", s=1)
+plt.scatter(raw_probe_cyc_list[0][:len(Q_limited_list)], Q_limited_list, label='Running Capacity', s = 1)
+
+#calculate MAE
+idx_list_true =  [int(value) for value in cyc_all]
+mae = round(np.mean(np.abs(true_q_scaled - pred_q_scaled[idx_list_true])), 3)
+plt.text(0, 0.86, "MAE: " + str(mae))
+
+# calculate error at 1000
+idx_true = np.argmin(np.abs(cyc_all - 1000))
+idx_syn = np.argmin(np.abs(cyc_explt - 1000))
+print(idx_true)
+print(idx_syn)
+
+#plt.scatter(cyc_all[idx_true], true_q_scaled[idx_true],s = 20)
+#plt.scatter(cyc_explt[idx_syn], pred_q_scaled[idx_syn], s - 20)
+error = round(abs(true_q_scaled[idx_true] - pred_q_scaled[idx_syn]), 3)
+
+plt.text(0, 0.90, "Error ot 1000 cycle," str(error))
+
+plt.xlabel("Cycle")
+plt.ylabel("probe_Q")
+plt.legend()
+#plt.ylim(0.7, 0.95)
+
+plt.suptitle("Training" + "(Q vs Cycle)")
+
+plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+plt.suptitle(cell_name + " (true vs prediction)")
+plt.legend(['true', 'pred', 'true running Q (limited)'], loc = 'upper right', markerscale =10, bbox_to_anchor = (2.0, 1.0))
+plt.savefig(cell_name + "_with_finetune.png", bbox_inches = 'tight')
+
+print(PROBE_Q_NORMALIZE)
